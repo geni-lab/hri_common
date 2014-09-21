@@ -32,14 +32,14 @@ __author__ = 'Jamie Diprose'
 
 import rospy
 from hri_msgs.msg import GazeAction, GazeActionFeedback
-from hri_framework import IGazeActionServer
+from hri_framework import ITargetActionServer
 from geometry_msgs.msg import PointStamped, Point
 from std_srvs.srv import Empty
 import tf
 from math import sqrt
 from ros_blender_bridge.srv import SetSpeed, SetAcceleration
 from hri_framework.entity_proxy import EntityProxy
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Empty as EmptyMsg
 
 
 
@@ -57,17 +57,18 @@ def interpolate(value, old_min, old_max, new_min, new_max):
     return new_val
 
 
-class BlenderGazeServer(IGazeActionServer):
+class BlenderTargetServer(ITargetActionServer):
 
-    GAZE_REACHED = 0.1
+    MIN_SUCCEEDED_DISTANCE = 0.1
+    MIN_ITERATIONS_STOPPED = 5
 
     def __init__(self, controller_name, target_name):
-        super(BlenderGazeServer, self).__init__()
+        super(BlenderTargetServer, self).__init__()
 
         self.tl = tf.TransformListener()
         self.controller_name = controller_name
         self.target_name = target_name
-        self.target_reached = False
+        self.joints_stopped = False
 
         self.gaze_target_pub = rospy.Publisher(self.controller_name + '/' + self.target_name, PointStamped, queue_size=1)
         self.enable_srv = rospy.ServiceProxy(self.controller_name + '/enable', Empty)
@@ -75,16 +76,17 @@ class BlenderGazeServer(IGazeActionServer):
         self.speed_srv = rospy.ServiceProxy(self.controller_name + '/set_speed', SetSpeed)
         self.accel_srv = rospy.ServiceProxy(self.controller_name + '/set_acceleration', SetAcceleration)
 
-        rospy.Subscriber(self.controller_name + '/target_reached', Bool, self.target_reached_callback)
+        rospy.Subscriber(self.controller_name + '/joints_stopped', EmptyMsg, self.joints_stopped_callback)
 
-    def target_reached_callback(self, msg):
-        self.target_reached = msg.data
+    def joints_stopped_callback(self, msg):
+        self.joints_stopped = True
 
     def execute(self, gaze_goal):
         self.enable_srv()
         self.speed_srv(gaze_goal.speed)
         self.speed_srv(interpolate(gaze_goal.speed, 0.0, 1.0, 0.0, 0.3))
-        self.target_reached = False
+        self.joints_stopped = False
+        count = 0
 
         while not rospy.is_shutdown() and not self.action_server.is_preempt_requested() and self.action_server.is_active():
             entity = EntityProxy(gaze_goal.target)
@@ -102,14 +104,17 @@ class BlenderGazeServer(IGazeActionServer):
                 continue
 
             try:
-                (curr_trans, curr_rot) = self.tl.lookupTransform(self.gaze_frame, entity_tf_frame, rospy.Time(0))
+                if self.joints_stopped:
+                    count += 1
+
+                (curr_trans, curr_rot) = self.tl.lookupTransform(self.end_effector_frame, entity_tf_frame, rospy.Time(0))
                 y = curr_trans[1]
                 z = curr_trans[2]
                 distance_to_target = sqrt(y*y + z*z)
-                rospy.loginfo('gaze_frame: {0}, entity_tf_frame: {1}, y: {2}, z: {3}, distance: {4}'.format(self.gaze_frame, entity_tf_frame, y, z, distance_to_target))
+                rospy.loginfo('gaze_frame: {0}, entity_tf_frame: {1}, y: {2}, z: {3}, distance: {4}'.format(self.end_effector_frame, entity_tf_frame, y, z, distance_to_target))
                 self.send_feedback(distance_to_target)
 
-                if distance_to_target < BlenderGazeServer.GAZE_REACHED: #or self.target_reached: #TODO: check min max motor positions because person could be out of bounds of gaze
+                if distance_to_target < BlenderTargetServer.MIN_SUCCEEDED_DISTANCE or (self.joints_stopped and count < BlenderTargetServer.MIN_ITERATIONS_STOPPED):
                     self.action_server.set_succeeded()
 
             except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
@@ -118,3 +123,7 @@ class BlenderGazeServer(IGazeActionServer):
             self.rate.sleep()
 
         self.disable_srv()
+
+
+                    #or self.target_reached:
+                    # #TODO: check min max motor positions because person could be out of bounds of gaze
