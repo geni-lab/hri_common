@@ -1,0 +1,6 @@
+
+people_source:
+  topic: simple_face_tracker/user_list
+  entity:
+    module: hri_api.entities
+    class: Person
